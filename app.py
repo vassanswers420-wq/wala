@@ -3,15 +3,14 @@ import os
 import yfinance as yf
 import time
 import threading
-from threading import Lock
 
 # ================== APP SETUP ==================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'))
 
 # ================== CONFIG ==================
-CACHE_TTL = 10       # seconds
-UPDATE_INTERVAL = 5  # background refresh interval in seconds
+CACHE_TTL = 15       # seconds
+UPDATE_INTERVAL = 60 # 🔥 IMPORTANT (was 5)
 
 # ================== SYMBOLS ==================
 SYMBOLS = [
@@ -27,13 +26,7 @@ SYMBOLS = [
 ]
 
 # ================== CACHE ==================
-cache = {}    # {symbol: (timestamp, data)}
-locks = {}    # {symbol: Lock()}
-
-def get_lock(symbol):
-    if symbol not in locks:
-        locks[symbol] = Lock()
-    return locks[symbol]
+cache = {}  # {symbol: (timestamp, data)}
 
 def get_cached(symbol):
     now = time.time()
@@ -46,29 +39,54 @@ def get_cached(symbol):
 def set_cache(symbol, data):
     cache[symbol] = (time.time(), data)
 
-# ================== SAFE FETCH HELPER ==================
-def safe_fetch(symbol, interval="1m", period="1d"):
-    """Fetch OHLC data safely from yfinance; returns empty list if failed"""
+# ================== BATCH FETCH ==================
+def fetch_all_symbols():
     try:
-        ticker = yf.Ticker(f"{symbol}.NS")
-        df = ticker.history(interval=interval, period=period)
-        if df.empty:
-            return []
+        tickers = " ".join([f"{s}.NS" for s in SYMBOLS])
 
-        ohlc = []
-        for t, row in df.iterrows():
-            ohlc.append({
-                "time": int(t.timestamp() * 1000),
-                "open": float(row["Open"]),
-                "high": float(row["High"]),
-                "low": float(row["Low"]),
-                "close": float(row["Close"]),
-                "volume": int(row["Volume"])
-            })
-        return ohlc
+        data = yf.download(
+            tickers=tickers,
+            interval="1m",
+            period="1d",
+            group_by="ticker",
+            threads=False  # 🔥 CRITICAL
+        )
+
+        for symbol in SYMBOLS:
+            try:
+                df = data[symbol + ".NS"]
+
+                if df.empty:
+                    continue
+
+                ohlc = []
+                for t, row in df.iterrows():
+                    ohlc.append({
+                        "time": int(t.timestamp() * 1000),
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": float(row["Close"]),
+                        "volume": int(row["Volume"])
+                    })
+
+                set_cache(symbol, ohlc)
+
+            except Exception as e:
+                print(f"{symbol} parse error:", e)
+
     except Exception as e:
-        print(f"Failed to fetch {symbol}: {e}")
-        return []
+        print("Batch fetch failed:", e)
+
+# ================== BACKGROUND LOOP ==================
+def update_loop():
+    while True:
+        fetch_all_symbols()
+        time.sleep(UPDATE_INTERVAL)
+
+@app.before_first_request
+def start_background_thread():
+    threading.Thread(target=update_loop, daemon=True).start()
 
 # ================== ROUTES ==================
 @app.route('/')
@@ -82,39 +100,17 @@ def get_symbols():
 @app.route('/api/data')
 def get_symbol_data():
     symbol = request.args.get('symbol', '').upper()
+
     if not symbol:
         return jsonify({"error": "Symbol required"}), 400
 
-    try:
-        # ✅ check cache first
-        cached = get_cached(symbol)
-        if cached:
-            return jsonify(cached)
+    cached = get_cached(symbol)
+    if cached:
+        return jsonify(cached)
 
-        lock = get_lock(symbol)
+    # fallback if not cached yet
+    return jsonify([])
 
-        # 🔒 prevent duplicate fetch
-        with lock:
-            cached = get_cached(symbol)
-            if cached:
-                return jsonify(cached)
-
-            ohlc = safe_fetch(symbol)
-            set_cache(symbol, ohlc)
-            return jsonify(ohlc)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ================== BACKGROUND UPDATER ==================
-def update_loop():
-    while True:
-        for symbol in SYMBOLS:
-            ohlc = safe_fetch(symbol)
-            if ohlc:
-                set_cache(symbol, ohlc)
-        time.sleep(UPDATE_INTERVAL)
-
-@app.before_first_request
-def start_background_thread():
-    threading.Thread(target=update_loop, daemon=True).start()
+# ================== START ==================
+if __name__ == "__main__":
+    app.run(debug=True)
