@@ -1,5 +1,4 @@
 from flask import Flask, render_template, jsonify, request
-import json
 import os
 import yfinance as yf
 import time
@@ -11,8 +10,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'))
 
 # ================== CONFIG ==================
-CACHE_TTL = 10  # seconds
-UPDATE_INTERVAL = 5  # background refresh
+CACHE_TTL = 10       # seconds
+UPDATE_INTERVAL = 5  # background refresh interval in seconds
 
 # ================== SYMBOLS ==================
 SYMBOLS = [
@@ -28,8 +27,8 @@ SYMBOLS = [
 ]
 
 # ================== CACHE ==================
-cache = {}        # {symbol: (timestamp, data)}
-locks = {}        # {symbol: Lock()}
+cache = {}    # {symbol: (timestamp, data)}
+locks = {}    # {symbol: Lock()}
 
 def get_lock(symbol):
     if symbol not in locks:
@@ -47,17 +46,38 @@ def get_cached(symbol):
 def set_cache(symbol, data):
     cache[symbol] = (time.time(), data)
 
+# ================== SAFE FETCH HELPER ==================
+def safe_fetch(symbol, interval="1m", period="1d"):
+    """Fetch OHLC data safely from yfinance; returns empty list if failed"""
+    try:
+        ticker = yf.Ticker(f"{symbol}.NS")
+        df = ticker.history(interval=interval, period=period)
+        if df.empty:
+            return []
+
+        ohlc = []
+        for t, row in df.iterrows():
+            ohlc.append({
+                "time": int(t.timestamp() * 1000),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": int(row["Volume"])
+            })
+        return ohlc
+    except Exception as e:
+        print(f"Failed to fetch {symbol}: {e}")
+        return []
+
 # ================== ROUTES ==================
 @app.route('/')
 def index():
     return render_template('index.html')
 
-
 @app.route('/api/symbols')
 def get_symbols():
-    # send structured symbols
     return jsonify([{"symbol": s, "name": s} for s in SYMBOLS])
-
 
 @app.route('/api/data')
 def get_symbol_data():
@@ -66,7 +86,7 @@ def get_symbol_data():
         return jsonify({"error": "Symbol required"}), 400
 
     try:
-        # ✅ 1. check cache
+        # ✅ check cache first
         cached = get_cached(symbol)
         if cached:
             return jsonify(cached)
@@ -79,59 +99,22 @@ def get_symbol_data():
             if cached:
                 return jsonify(cached)
 
-            ticker = yf.Ticker(f"{symbol}.NS")
-            df = ticker.history(interval="1m", period="1d")
-
-            if df.empty:
-                return jsonify([])
-
-            ohlc = []
-            for t, row in df.iterrows():
-                ohlc.append({
-                    "time": int(t.timestamp() * 1000),
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
-                    "volume": int(row["Volume"])
-                })
-
+            ohlc = safe_fetch(symbol)
             set_cache(symbol, ohlc)
             return jsonify(ohlc)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 # ================== BACKGROUND UPDATER ==================
 def update_loop():
     while True:
         for symbol in SYMBOLS:
-            try:
-                ticker = yf.Ticker(f"{symbol}.NS")
-                df = ticker.history(interval="1m", period="1d")
-
-                if not df.empty:
-                    ohlc = []
-                    for t, row in df.iterrows():
-                        ohlc.append({
-                            "time": int(t.timestamp() * 1000),
-                            "open": float(row["Open"]),
-                            "high": float(row["High"]),
-                            "low": float(row["Low"]),
-                            "close": float(row["Close"]),
-                            "volume": int(row["Volume"])
-                        })
-
-                    set_cache(symbol, ohlc)
-
-            except Exception as e:
-                print(f"Error updating {symbol}: {e}")
-
+            ohlc = safe_fetch(symbol)
+            if ohlc:
+                set_cache(symbol, ohlc)
         time.sleep(UPDATE_INTERVAL)
 
-
-# ================== RUN ==================
 # ================== RUN ==================
 @app.before_serving
 def start_background_thread():
