@@ -38,48 +38,82 @@ def set_cache(symbol, data):
     cache[symbol] = (time.time(), data)
 
 # ================== FETCH DATA ==================
+from datetime import datetime
+
 def fetch_symbol(symbol):
     try:
         stooq_symbol = SYMBOL_MAP.get(symbol)
         if not stooq_symbol:
             return []
 
+        # Try intraday first
         url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=1"
         res = requests.get(url, timeout=5)
 
-        if res.status_code != 200:
+        if res.status_code != 200 or "No data" in res.text:
             return []
 
-        lines = res.text.split("\n")
+        lines = res.text.strip().split("\n")
         candles = []
 
-        # skip header
-        for line in lines[1:]:
-            if not line.strip():
-                continue
-
+        for line in lines[1:]:  # skip header
             parts = line.split(",")
+
             if len(parts) < 6:
                 continue
 
-            # date,time,open,high,low,close,volume
-            ts = parts[0] + " " + parts[1]
+            try:
+                # ✅ FIXED TIME PARSING
+                dt_str = parts[0] + " " + parts[1]
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+                timestamp = int(dt.timestamp() * 1000)
 
-            candles.append({
-                "time": int(time.time() * 1000),  # fallback time
-                "open": float(parts[2]),
-                "high": float(parts[3]),
-                "low": float(parts[4]),
-                "close": float(parts[5]),
-                "volume": int(parts[6]) if len(parts) > 6 else 0
-            })
+                candles.append({
+                    "time": timestamp,
+                    "open": float(parts[2]),
+                    "high": float(parts[3]),
+                    "low": float(parts[4]),
+                    "close": float(parts[5]),
+                    "volume": int(parts[6]) if len(parts) > 6 else 0
+                })
 
-        return candles[-200:]  # last 200 candles
+            except Exception:
+                continue
+
+        # 🔥 FALLBACK: if intraday empty → try daily
+        if not candles:
+            url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
+            res = requests.get(url, timeout=5)
+
+            lines = res.text.strip().split("\n")
+
+            for line in lines[1:]:
+                parts = line.split(",")
+
+                if len(parts) < 5:
+                    continue
+
+                try:
+                    dt = datetime.strptime(parts[0], "%Y-%m-%d")
+                    timestamp = int(dt.timestamp() * 1000)
+
+                    candles.append({
+                        "time": timestamp,
+                        "open": float(parts[1]),
+                        "high": float(parts[2]),
+                        "low": float(parts[3]),
+                        "close": float(parts[4]),
+                        "volume": int(parts[5]) if len(parts) > 5 else 0
+                    })
+
+                except:
+                    continue
+
+        return candles[-200:]
 
     except Exception as e:
         print(symbol, "error:", e)
         return []
-
 # ================== BACKGROUND LOOP ==================
 def update_loop():
     while True:
@@ -118,8 +152,14 @@ def get_symbol_data():
     if cached:
         return jsonify(cached)
 
-    return jsonify([])
+    # 🔥 FETCH IF NOT IN CACHE
+    data = fetch_symbol(symbol)
 
+    if data:
+        set_cache(symbol, data)
+        return jsonify(data)
+
+    return jsonify({"error": "No data available"})
 # ================== START ==================
 if __name__ == "__main__":
     app.run(debug=True)
