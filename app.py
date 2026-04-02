@@ -9,14 +9,19 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'))
 
 # ================== CONFIG ==================
-CACHE_TTL = 10
-UPDATE_INTERVAL = 20
+CACHE_TTL = 15
+UPDATE_INTERVAL = 60
 
-# ================== SYMBOLS ==================
-SYMBOLS = [
-    "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN",
-    "KOTAKBANK","AXISBANK","INDUSINDBK","WIPRO","HCLTECH","TECHM"
-]
+# ================== SYMBOL MAP ==================
+# NSE → Stooq format (limited coverage)
+SYMBOL_MAP = {
+    "RELIANCE": "reliance.in",
+    "TCS": "tcs.in",
+    "INFY": "infy.in",
+    "HDFCBANK": "hdfcbank.in",
+    "ICICIBANK": "icicibank.in",
+    "SBIN": "sbin.in"
+}
 
 # ================== CACHE ==================
 cache = {}
@@ -32,63 +37,44 @@ def get_cached(symbol):
 def set_cache(symbol, data):
     cache[symbol] = (time.time(), data)
 
-# ================== SESSION ==================
-session = requests.Session()
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json",
-    "Referer": "https://www.nseindia.com/",
-}
-
-def init_session():
+# ================== FETCH DATA ==================
+def fetch_symbol(symbol):
     try:
-        session.get("https://www.nseindia.com", headers=HEADERS, timeout=5)
-    except:
-        pass
+        stooq_symbol = SYMBOL_MAP.get(symbol)
+        if not stooq_symbol:
+            return []
 
-# ================== FETCH CANDLES ==================
-def fetch_candles(symbol):
-    try:
-        url = f"https://www.nseindia.com/api/chart-databyindex?index={symbol}"
-        res = session.get(url, headers=HEADERS, timeout=5)
+        url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=1"
+        res = requests.get(url, timeout=5)
 
         if res.status_code != 200:
             return []
 
-        data = res.json()
-
-        timestamps = data.get("grapthData", [])
-
+        lines = res.text.split("\n")
         candles = []
 
-        # Convert tick data → OHLC (1m grouping)
-        bucket = []
+        # skip header
+        for line in lines[1:]:
+            if not line.strip():
+                continue
 
-        current_min = None
+            parts = line.split(",")
+            if len(parts) < 6:
+                continue
 
-        for ts, price in timestamps:
-            minute = int(ts // 60000)
+            # date,time,open,high,low,close,volume
+            ts = parts[0] + " " + parts[1]
 
-            if current_min is None:
-                current_min = minute
+            candles.append({
+                "time": int(time.time() * 1000),  # fallback time
+                "open": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "close": float(parts[5]),
+                "volume": int(parts[6]) if len(parts) > 6 else 0
+            })
 
-            if minute != current_min:
-                if bucket:
-                    candles.append({
-                        "time": bucket[0][0],
-                        "open": bucket[0][1],
-                        "high": max(x[1] for x in bucket),
-                        "low": min(x[1] for x in bucket),
-                        "close": bucket[-1][1],
-                        "volume": 0
-                    })
-                bucket = []
-                current_min = minute
-
-            bucket.append((ts, price))
-
-        return candles
+        return candles[-200:]  # last 200 candles
 
     except Exception as e:
         print(symbol, "error:", e)
@@ -96,17 +82,13 @@ def fetch_candles(symbol):
 
 # ================== BACKGROUND LOOP ==================
 def update_loop():
-    init_session()
-
     while True:
-        for symbol in SYMBOLS:
+        for symbol in SYMBOL_MAP.keys():
             try:
-                time.sleep(0.5)  # prevent blocking
-
-                candles = fetch_candles(symbol)
-                if candles:
-                    set_cache(symbol, candles)
-
+                time.sleep(1)
+                data = fetch_symbol(symbol)
+                if data:
+                    set_cache(symbol, data)
             except Exception as e:
                 print(symbol, "update error:", e)
 
@@ -123,7 +105,7 @@ def index():
 
 @app.route('/api/symbols')
 def get_symbols():
-    return jsonify([{"symbol": s, "name": s} for s in SYMBOLS])
+    return jsonify([{"symbol": s, "name": s} for s in SYMBOL_MAP.keys()])
 
 @app.route('/api/data')
 def get_symbol_data():
