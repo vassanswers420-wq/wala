@@ -116,6 +116,7 @@ def update_loop():
         time.sleep(UPDATE_INTERVAL)
 
 # ================== RUN ==================
-@app.before_serving
+# ================== RUN ==================
+@app.before_first_request
 def start_background_thread():
     threading.Thread(target=update_loop, daemon=True).start()
