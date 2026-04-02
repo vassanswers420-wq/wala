@@ -133,6 +133,6 @@ def update_loop():
 
 # ================== RUN ==================
 # ================== RUN ==================
-@app.before_first_request
+@app.before_serving
 def start_background_thread():
     threading.Thread(target=update_loop, daemon=True).start()
