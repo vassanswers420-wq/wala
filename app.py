@@ -3,6 +3,7 @@ import os
 import time
 import threading
 import requests
+from datetime import datetime
 
 # ================== APP SETUP ==================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -13,7 +14,6 @@ CACHE_TTL = 15
 UPDATE_INTERVAL = 60
 
 # ================== SYMBOL MAP ==================
-# NSE → Stooq format (limited coverage)
 SYMBOL_MAP = {
     "RELIANCE": "reliance.in",
     "TCS": "tcs.in",
@@ -38,82 +38,97 @@ def set_cache(symbol, data):
     cache[symbol] = (time.time(), data)
 
 # ================== FETCH DATA ==================
-from datetime import datetime
-
 def fetch_symbol(symbol):
     try:
         stooq_symbol = SYMBOL_MAP.get(symbol)
         if not stooq_symbol:
             return []
 
-        # Try intraday first
+        candles = []
+
+        # ===== TRY INTRADAY =====
         url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=1"
         res = requests.get(url, timeout=5)
 
-        if res.status_code != 200 or "No data" in res.text:
-            return []
-
-        lines = res.text.strip().split("\n")
-        candles = []
-
-        for line in lines[1:]:  # skip header
-            parts = line.split(",")
-
-            if len(parts) < 6:
-                continue
-
-            try:
-                # ✅ FIXED TIME PARSING
-                dt_str = parts[0] + " " + parts[1]
-                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-                timestamp = int(dt.timestamp() * 1000)
-
-                candles.append({
-                    "time": timestamp,
-                    "open": float(parts[2]),
-                    "high": float(parts[3]),
-                    "low": float(parts[4]),
-                    "close": float(parts[5]),
-                    "volume": int(parts[6]) if len(parts) > 6 else 0
-                })
-
-            except Exception:
-                continue
-
-        # 🔥 FALLBACK: if intraday empty → try daily
-        if not candles:
-            url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
-            res = requests.get(url, timeout=5)
-
+        if res.status_code == 200 and "No data" not in res.text:
             lines = res.text.strip().split("\n")
 
             for line in lines[1:]:
                 parts = line.split(",")
 
-                if len(parts) < 5:
+                if len(parts) < 6:
                     continue
 
                 try:
-                    dt = datetime.strptime(parts[0], "%Y-%m-%d")
+                    dt_str = parts[0] + " " + parts[1]
+                    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
                     timestamp = int(dt.timestamp() * 1000)
 
                     candles.append({
                         "time": timestamp,
-                        "open": float(parts[1]),
-                        "high": float(parts[2]),
-                        "low": float(parts[3]),
-                        "close": float(parts[4]),
-                        "volume": int(parts[5]) if len(parts) > 5 else 0
+                        "open": float(parts[2]),
+                        "high": float(parts[3]),
+                        "low": float(parts[4]),
+                        "close": float(parts[5]),
+                        "volume": int(parts[6]) if len(parts) > 6 else 0
                     })
-
                 except:
                     continue
+
+        # ===== FALLBACK TO DAILY =====
+        if not candles:
+            url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
+            res = requests.get(url, timeout=5)
+
+            if res.status_code == 200:
+                lines = res.text.strip().split("\n")
+
+                for line in lines[1:]:
+                    parts = line.split(",")
+
+                    if len(parts) < 5:
+                        continue
+
+                    try:
+                        dt = datetime.strptime(parts[0], "%Y-%m-%d")
+                        timestamp = int(dt.timestamp() * 1000)
+
+                        candles.append({
+                            "time": timestamp,
+                            "open": float(parts[1]),
+                            "high": float(parts[2]),
+                            "low": float(parts[3]),
+                            "close": float(parts[4]),
+                            "volume": int(parts[5]) if len(parts) > 5 else 0
+                        })
+                    except:
+                        continue
+
+        # ===== GUARANTEED FALLBACK =====
+        if not candles:
+            now = int(time.time() * 1000)
+            candles = [{
+                "time": now,
+                "open": 0,
+                "high": 0,
+                "low": 0,
+                "close": 0,
+                "volume": 0
+            }]
 
         return candles[-200:]
 
     except Exception as e:
         print(symbol, "error:", e)
-        return []
+        return [{
+            "time": int(time.time() * 1000),
+            "open": 0,
+            "high": 0,
+            "low": 0,
+            "close": 0,
+            "volume": 0
+        }]
+
 # ================== BACKGROUND LOOP ==================
 def update_loop():
     while True:
@@ -121,8 +136,7 @@ def update_loop():
             try:
                 time.sleep(1)
                 data = fetch_symbol(symbol)
-                if data:
-                    set_cache(symbol, data)
+                set_cache(symbol, data)
             except Exception as e:
                 print(symbol, "update error:", e)
 
@@ -146,20 +160,18 @@ def get_symbol_data():
     symbol = request.args.get('symbol', '').upper()
 
     if not symbol:
-        return jsonify({"error": "Symbol required"}), 400
+        return jsonify([])
 
     cached = get_cached(symbol)
     if cached:
         return jsonify(cached)
 
-    # 🔥 FETCH IF NOT IN CACHE
+    # fetch if not cached
     data = fetch_symbol(symbol)
+    set_cache(symbol, data)
 
-    if data:
-        set_cache(symbol, data)
-        return jsonify(data)
+    return jsonify(data)
 
-    return jsonify({"error": "No data available"})
 # ================== START ==================
 if __name__ == "__main__":
     app.run(debug=True)
