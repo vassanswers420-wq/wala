@@ -1,32 +1,25 @@
 from flask import Flask, render_template, jsonify, request
 import os
-import yfinance as yf
 import time
 import threading
+import requests
 
 # ================== APP SETUP ==================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'))
 
 # ================== CONFIG ==================
-CACHE_TTL = 15       # seconds
-UPDATE_INTERVAL = 60 # 🔥 IMPORTANT (was 5)
+CACHE_TTL = 10
+UPDATE_INTERVAL = 20
 
 # ================== SYMBOLS ==================
 SYMBOLS = [
     "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN",
-    "KOTAKBANK","AXISBANK","INDUSINDBK","WIPRO","HCLTECH","TECHM",
-    "ONGC","BPCL","IOC","POWERGRID","NTPC","ITC","HINDUNILVR",
-    "NESTLEIND","BRITANNIA","DABUR","MARICO","MARUTI","TATAMOTORS",
-    "M&M","BAJAJ-AUTO","HEROMOTOCO","EICHERMOT","SUNPHARMA",
-    "DRREDDY","CIPLA","DIVISLAB","LUPIN","TATASTEEL","JSWSTEEL",
-    "HINDALCO","COALINDIA","VEDL","LT","ULTRACEMCO","ASIANPAINT",
-    "BAJFINANCE","BAJAJFINSV","ADANIENT","ADANIPORTS","GRASIM",
-    "SHREECEM","APOLLOHOSP"
+    "KOTAKBANK","AXISBANK","INDUSINDBK","WIPRO","HCLTECH","TECHM"
 ]
 
 # ================== CACHE ==================
-cache = {}  # {symbol: (timestamp, data)}
+cache = {}
 
 def get_cached(symbol):
     now = time.time()
@@ -39,49 +32,84 @@ def get_cached(symbol):
 def set_cache(symbol, data):
     cache[symbol] = (time.time(), data)
 
-# ================== BATCH FETCH ==================
-def fetch_all_symbols():
+# ================== SESSION ==================
+session = requests.Session()
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
+    "Referer": "https://www.nseindia.com/",
+}
+
+def init_session():
     try:
-        tickers = " ".join([f"{s}.NS" for s in SYMBOLS])
+        session.get("https://www.nseindia.com", headers=HEADERS, timeout=5)
+    except:
+        pass
 
-        data = yf.download(
-            tickers=tickers,
-            interval="1m",
-            period="1d",
-            group_by="ticker",
-            threads=False  # 🔥 CRITICAL
-        )
+# ================== FETCH CANDLES ==================
+def fetch_candles(symbol):
+    try:
+        url = f"https://www.nseindia.com/api/chart-databyindex?index={symbol}"
+        res = session.get(url, headers=HEADERS, timeout=5)
 
-        for symbol in SYMBOLS:
-            try:
-                df = data[symbol + ".NS"]
+        if res.status_code != 200:
+            return []
 
-                if df.empty:
-                    continue
+        data = res.json()
 
-                ohlc = []
-                for t, row in df.iterrows():
-                    ohlc.append({
-                        "time": int(t.timestamp() * 1000),
-                        "open": float(row["Open"]),
-                        "high": float(row["High"]),
-                        "low": float(row["Low"]),
-                        "close": float(row["Close"]),
-                        "volume": int(row["Volume"])
+        timestamps = data.get("grapthData", [])
+
+        candles = []
+
+        # Convert tick data → OHLC (1m grouping)
+        bucket = []
+
+        current_min = None
+
+        for ts, price in timestamps:
+            minute = int(ts // 60000)
+
+            if current_min is None:
+                current_min = minute
+
+            if minute != current_min:
+                if bucket:
+                    candles.append({
+                        "time": bucket[0][0],
+                        "open": bucket[0][1],
+                        "high": max(x[1] for x in bucket),
+                        "low": min(x[1] for x in bucket),
+                        "close": bucket[-1][1],
+                        "volume": 0
                     })
+                bucket = []
+                current_min = minute
 
-                set_cache(symbol, ohlc)
+            bucket.append((ts, price))
 
-            except Exception as e:
-                print(f"{symbol} parse error:", e)
+        return candles
 
     except Exception as e:
-        print("Batch fetch failed:", e)
+        print(symbol, "error:", e)
+        return []
 
 # ================== BACKGROUND LOOP ==================
 def update_loop():
+    init_session()
+
     while True:
-        fetch_all_symbols()
+        for symbol in SYMBOLS:
+            try:
+                time.sleep(0.5)  # prevent blocking
+
+                candles = fetch_candles(symbol)
+                if candles:
+                    set_cache(symbol, candles)
+
+            except Exception as e:
+                print(symbol, "update error:", e)
+
         time.sleep(UPDATE_INTERVAL)
 
 @app.before_first_request
@@ -108,7 +136,6 @@ def get_symbol_data():
     if cached:
         return jsonify(cached)
 
-    # fallback if not cached yet
     return jsonify([])
 
 # ================== START ==================
