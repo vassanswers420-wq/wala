@@ -13,5 +13,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Expose port (optional, Render sets it)
 EXPOSE 10000
 
-# Start Flask app using Gunicorn
-CMD gunicorn app:app --bind 0.0.0.0:$PORT
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1"]
