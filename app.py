@@ -132,7 +132,7 @@ def update_loop():
 
 
 # ================== RUN ==================
-if __name__ == '__main__':
-    # start background thread **only when running locally**
+# ================== RUN ==================
+@app.before_first_request
+def start_background_thread():
     threading.Thread(target=update_loop, daemon=True).start()
-    app.run(debug=True, threaded=True)
