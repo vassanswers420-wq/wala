@@ -131,10 +131,8 @@ def update_loop():
         time.sleep(UPDATE_INTERVAL)
 
 
-# start background thread
-threading.Thread(target=update_loop, daemon=True).start()
-
-
 # ================== RUN ==================
 if __name__ == '__main__':
+    # start background thread **only when running locally**
+    threading.Thread(target=update_loop, daemon=True).start()
     app.run(debug=True, threaded=True)
