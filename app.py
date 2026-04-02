@@ -115,8 +115,6 @@ def update_loop():
                 set_cache(symbol, ohlc)
         time.sleep(UPDATE_INTERVAL)
 
-# ================== RUN ==================
-# ================== RUN ==================
 @app.before_first_request
 def start_background_thread():
     threading.Thread(target=update_loop, daemon=True).start()
